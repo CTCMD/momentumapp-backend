@@ -1,3 +1,4 @@
+
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -21,7 +22,7 @@ print("STRIPE_WEBHOOK_SECRET:", STRIPE_WEBHOOK_SECRET)
 
 stripe.api_key = STRIPE_SECRET_KEY
 
-PRICE_ID = "price_1Sw8XCELLxArJ4j1VOl7T92N"  # ✅ NUEVO PRICE LIVE
+PRICE_ID = "price_1SyJzBEHLxArJ4j1jId0Hnsc"  # ✅ NUEVO PRICE LIVE
 DB = "users.db"
 
 # =========================
