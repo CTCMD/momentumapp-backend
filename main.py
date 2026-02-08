@@ -1,4 +1,3 @@
-
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -134,54 +133,105 @@ def status(email: str):
 # =========================
 # STRIPE CHECKOUT
 # =========================
-@app.post("/create-checkout-session")
-def create_checkout_session():
-    try:
-        print("➡️ Creando sesión Stripe con price:", PRICE_ID)
-
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": PRICE_ID, "quantity": 1}],
-            success_url="https://momentumapp.site/success",
-            cancel_url="https://momentumapp.site/cancel",
-        )
-
-        print("✅ Stripe session creada:", session.url)
-        return {"url": session.url}
-
-    except Exception as e:
-        print("❌ ERROR STRIPE:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-# =========================
-# STRIPE WEBHOOK
-# =========================
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig, STRIPE_WEBHOOK_SECRET
-        )
+        event = stripe.Webhook.construct_event(payload, sig,STRIPE_WEBHOOK_SECRET)
     except Exception as e:
-        print("❌ WEBHOOK ERROR:", str(e))
-        return JSONResponse(status_code=400, content={"detail": "Webhook error"})
+        print("Webhook error:", str(e))
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        email = session["customer_details"]["email"]
-        print("💰 Pago completado:", email)
+    event_type = event["type"]
+    data = event["data"]["object"]
 
-        conn = sqlite3.connect(DB)
-        c = conn.cursor()
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+
+    # =========================
+    # ALTA SUSCRIPCIÓN
+    # =========================
+    if event_type == "checkout.session.completed":
+        email = data["customer_details"]["email"]
+        customer_id = data["customer"]
+        subscription_id = data["subscription"]
+
+        print("Nueva suscripción:", email)
+
+        sub = stripe.Subscription.retrieve(subscription_id)
+
         c.execute("""
-            INSERT INTO users (email, is_active)
-            VALUES (?, 1)
-            ON CONFLICT(email) DO UPDATE SET is_active=1
-        """, (email,))
-        conn.commit()
-        conn.close()
+            INSERT INTO subscriptions 
+            (email, stripe_customer_id, stripe_subscription_id, status, current_period_end)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                stripe_customer_id = excluded.stripe_customer_id,
+                stripe_subscription_id = excluded.stripe_subscription_id,
+                status = excluded.status,
+                current_period_end = excluded.current_period_end
+        """, (
+            email,
+            customer_id,
+            subscription_id,
+            sub["status"],
+            sub["current_period_end"]
+        ))
+
+    # =========================
+    # RENOVACIÓN CORRECTA
+    # =========================
+    elif event_type == "invoice.paid":
+        customer_id = data["customer"]
+
+        c.execute("""
+            UPDATE subscriptions
+            SET status='active'
+            WHERE stripe_customer_id=?
+        """, (customer_id,))
+
+    # =========================
+    # IMPAGO
+    # =========================
+    elif event_type == "invoice.payment_failed":
+        customer_id = data["customer"]
+
+        c.execute("""
+            UPDATE subscriptions
+            SET status='past_due'
+            WHERE stripe_customer_id=?
+        """, (customer_id,))
+
+    # =========================
+    # CANCELACIÓN
+    # =========================
+    elif event_type == "customer.subscription.deleted":
+        subscription_id = data["id"]
+
+        c.execute("""
+            UPDATE subscriptions
+            SET status='canceled'
+            WHERE stripe_subscription_id=?
+        """, (subscription_id,))
+
+    conn.commit()
+    conn.close()
 
     return {"status": "ok"}
+@app.get("/premium-check/{email}")
+def premium_check(email: str):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT status FROM subscriptions WHERE email=?
+    """, (email,))
+
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return {"active": False}
+
+    return {"active": row[0] == "active"}
